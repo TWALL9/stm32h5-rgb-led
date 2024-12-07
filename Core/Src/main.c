@@ -53,6 +53,12 @@ DMA_HandleTypeDef handle_GPDMA1_Channel0;
 #define NUM_LEDS 6
 #define BITS_PER_PIXEL (4 * 8)  // For strips with dedicated alpha
 
+/**
+ * Prescaler = 0 to keep the timer frequency at 250MHz (aka 4ns per cnt)
+ * The WS2812B datasheet specifies that the PWM period should be 1.25us.
+ * The closest that can be is 312, so set the period (ARR) value to 311
+ * The duty cycle for a HI bit is 66%, and the duty for a LO bit is 33%
+ */
 const uint32_t WS2812_ARR = 311;
 const uint32_t LED_HI_BIT = WS2812_ARR * 2 / 3;
 const uint32_t LED_LO_BIT = WS2812_ARR * 1 / 3;
@@ -64,7 +70,14 @@ const uint32_t BLUE = 0x0000FF00;
 const uint32_t WHITE = 0x000000FF;
 const uint32_t OFF = 0x00000000;
 
+/**
+ * How this particular strategy works is to have two LED's worth of duty-cycles in one DMA buffer.
+ * The GPDMA fires an interrupt at every half transfer, and every full transfer.
+ * This means at each interrupt, you can convert the next LED's worth of RGBW values into 24 u32's (led_pixel_buffer)
+ */
 static uint32_t led_pixel_buffer[BITS_PER_PIXEL * 2];
+
+// This particular example does not reset the strip, it just blasts 6 LED's worth of data on the strip
 uint32_t led_colors[NUM_LEDS] = {RED, WHITE, GREEN, BLUE, RED, OFF};
 uint8_t current_led = 0;
 
@@ -118,10 +131,10 @@ static void grbw_to_pixel(uint32_t grbw, uint32_t* pixel_buf)
    * There is some wonky bit-wise stuff going on here.
    * My particular strip is GRBW. Which means that the green needs to be sent first
    * AKA the lower indices of pixel_buf.
-   * However, in grbw_to_pixel we are incrementing i from 0, which means the green values 
+   * However, in grbw_to_pixel we are incrementing i from 0, which means the green values
    * need to be evaluated first. This means that while my strip is GRBW, I need to reverse
    * the order of bits in the grbw value for them to be transmitted as grbw
-   */ 
+   */
   uint32_t strip_order_grbw = reverse_bits(grbw);
 
   for (uint8_t i = 0; i < BITS_PER_PIXEL; i++)
@@ -140,6 +153,20 @@ static void increment_led(uint8_t* led_count)
   }
 }
 
+/**
+ * User implementation of the two GPDMA transfer callbacks (half transfer and full transfer)
+ * As mentioned above, each of these callbacks will fire after transmitting one LED's worth of duty
+ * cycles, as the full DMA buffer is two LED's worth of duty cycles.
+ *
+ * This allows us to use each callback to update the portion of led_pixel_buffer that just finished writing
+ *
+ *           1/2T         2/2T
+ * >--------- v ---------- v ----------|
+ * ^  LED1    |     LED2   |           |
+ * |     update LED1    update LED2    |
+ * |                                   |
+ * |___________________________________|
+ */
 void HAL_TIM_PWM_PulseFinishedCallback(TIM_HandleTypeDef *htim)
 {
   grbw_to_pixel(led_colors[current_led], &led_pixel_buffer[BITS_PER_PIXEL]);
