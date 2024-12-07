@@ -21,7 +21,8 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include <stdint.h>
+#include <stdlib.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -49,6 +50,23 @@ DMA_QListTypeDef List_GPDMA1_Channel0;
 DMA_HandleTypeDef handle_GPDMA1_Channel0;
 
 /* USER CODE BEGIN PV */
+#define NUM_LEDS 6
+#define BITS_PER_PIXEL (4 * 8)  // For strips with dedicated alpha
+
+const uint32_t WS2812_ARR = 311;
+const uint32_t LED_HI_BIT = WS2812_ARR * 2 / 3;
+const uint32_t LED_LO_BIT = WS2812_ARR * 1 / 3;
+
+// My particular strip is GRBW
+const uint32_t GREEN = 0xFF000000;
+const uint32_t RED = 0x00FF0000;
+const uint32_t BLUE = 0x0000FF00;
+const uint32_t WHITE = 0x000000FF;
+const uint32_t OFF = 0x00000000;
+
+static uint32_t led_pixel_buffer[BITS_PER_PIXEL * 2];
+uint32_t led_colors[NUM_LEDS] = {RED, WHITE, GREEN, BLUE, RED, OFF};
+uint8_t current_led = 0;
 
 /* USER CODE END PV */
 
@@ -59,11 +77,80 @@ static void MX_GPDMA1_Init(void);
 static void MX_TIM8_Init(void);
 /* USER CODE BEGIN PFP */
 
+static uint32_t reverse_bits(uint32_t orig);
+static void grbw_to_pixel(uint32_t rgb, uint32_t* pixel_buf);
+static void increment_led(uint8_t* led_count);
+
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
+/**
+ * Reverse bit order of a u32
+ */
+static uint32_t reverse_bits(uint32_t orig)
+{
+  uint32_t reversed = 0;
+  const size_t num_bits = sizeof(orig) * 8;
+  for (uint32_t i = 0; i< num_bits; i++)
+  {
+    if ((orig & (1 << i)))
+    {
+      reversed |= 1 << ((num_bits - 1) - i);
+    }
+  }
+
+  return reversed;
+}
+
+/**
+ * Convert a value from grbw space to the actual duty cycle values needed for the PWM waveform
+ */
+static void grbw_to_pixel(uint32_t grbw, uint32_t* pixel_buf)
+{
+  if (pixel_buf == NULL)
+  {
+    return;
+  }
+
+  /**
+   * There is some wonky bit-wise stuff going on here.
+   * My particular strip is GRBW. Which means that the green needs to be sent first
+   * AKA the lower indices of pixel_buf.
+   * However, in grbw_to_pixel we are incrementing i from 0, which means the green values 
+   * need to be evaluated first. This means that while my strip is GRBW, I need to reverse
+   * the order of bits in the grbw value for them to be transmitted as grbw
+   */ 
+  uint32_t strip_order_grbw = reverse_bits(grbw);
+
+  for (uint8_t i = 0; i < BITS_PER_PIXEL; i++)
+  {
+    uint32_t pix_mask = 1 << i;
+    pixel_buf[i] = (pix_mask & strip_order_grbw) != 0 ? LED_HI_BIT : LED_LO_BIT;
+  }
+}
+
+static void increment_led(uint8_t* led_count)
+{
+  *led_count += 1;
+  if (*led_count >= NUM_LEDS)
+  {
+    *led_count = 0;
+  }
+}
+
+void HAL_TIM_PWM_PulseFinishedCallback(TIM_HandleTypeDef *htim)
+{
+  grbw_to_pixel(led_colors[current_led], &led_pixel_buffer[BITS_PER_PIXEL]);
+  increment_led(&current_led);
+}
+
+void HAL_TIM_PWM_PulseFinishedHalfCpltCallback(TIM_HandleTypeDef *htim)
+{
+  grbw_to_pixel(led_colors[current_led], led_pixel_buffer);
+  increment_led(&current_led);
+}
 /* USER CODE END 0 */
 
 /**
@@ -74,7 +161,11 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
-
+  // Filling the first two LED's so that each transfer is one LED worth
+  grbw_to_pixel(led_colors[current_led], led_pixel_buffer);
+  increment_led(&current_led);
+  grbw_to_pixel(led_colors[current_led], &led_pixel_buffer[BITS_PER_PIXEL]);
+  increment_led(&current_led);
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -98,6 +189,13 @@ int main(void)
   MX_GPDMA1_Init();
   MX_TIM8_Init();
   /* USER CODE BEGIN 2 */
+
+  // Even though we've configured the GPDMA to transmit by word, the HAL_TIM_PWM_Start_DMA
+  // function takes the length of the DMA transfer buffer in BYTES.
+  // This is important, otherwise you won't transfer the entire buffer!
+
+  uint16_t bytes_for_transfer = BITS_PER_PIXEL * 2 * (sizeof(uint32_t) / sizeof(uint8_t));
+  HAL_TIM_PWM_Start_DMA(&htim8, TIM_CHANNEL_1, led_pixel_buffer, bytes_for_transfer);
 
   /* USER CODE END 2 */
 
